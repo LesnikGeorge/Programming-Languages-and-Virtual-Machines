@@ -101,11 +101,14 @@ CacheResult compute_once(size_t* arr) {
 
 
     std::vector<double> l1_times;
-    std::vector<size_t> sizes_tested;
-    for (size_t size = 4 * 1024; size <= 256 * 1024; size *= 2) {
+    std::vector<size_t> sizes_tested = {
+        4*1024, 8*1024, 12*1024, 16*1024, 24*1024, 32*1024, 
+        48*1024, 64*1024, 96*1024, 128*1024, 192*1024, 256*1024, 384*1024, 512*1024
+    };
+
+    for (size_t size : sizes_tested) {
         setup_chasing(arr, size, calc_line_size);
         l1_times.push_back(measure(arr));
-        sizes_tested.push_back(size);
     }
 
     size_t calc_l1_size = 32 * 1024;
@@ -123,7 +126,7 @@ CacheResult compute_once(size_t* arr) {
 
     std::vector<double> ways_times;
     std::vector<int> ways_tested;
-    for (int ways = 2; ways <= 32; ways += 2) {
+    for (int ways = 2; ways <= 32; ways++) {
         setup_chasing(arr, ways * calc_l1_size, calc_l1_size);
         ways_times.push_back(measure(arr));
         ways_tested.push_back(ways);
@@ -166,9 +169,9 @@ int main() {
     std::vector<CacheResult> history;
     CacheResult final_res;
 
-    //проверка на 2 из 3, либо первый с 3, либо любой с 2 если за 9 итераций не успели
+    //проверка на 2 из 3, либо первый с 3, либо любой с 2 если за 12 итераций не успели
     int attempts = 0;
-    while (attempts++ < 9) {
+    while (attempts++ < 12) {
         CacheResult res = compute_once(arr);
         history.push_back(res);
 
