@@ -1,0 +1,9 @@
+var i, j, sum = 0;
+
+for i := 0, i < 400, i := i + 1 do
+  for j := 0, j < 400, j := j + 1 do
+    sum := (sum + i * j) % 1000000007
+  od
+od;
+
+write (sum)

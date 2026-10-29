@@ -1,0 +1,103 @@
+=== Running regression tests (79 files) ===
+
+[test001] OK
+[test002] OK
+[test003] OK
+[test004] OK
+[test005] OK
+[test006] OK
+[test007] OK
+[test008] OK
+[test009] OK
+[test010] OK
+[test011] OK
+[test012] OK
+[test013] OK
+[test014] OK
+[test015] OK
+[test016] OK
+[test017] OK
+[test018] OK
+[test019] OK
+[test020] OK
+[test021] OK
+[test022] OK
+[test023] OK
+[test024] OK
+[test025] OK
+[test026] OK
+[test027] OK
+[test028] OK
+[test029] OK
+[test034] OK
+[test036] OK
+[test040] OK
+[test041] OK
+[test042] OK
+[test045] OK
+[test046] OK
+[test050] OK
+[test054] SKIPPED (not supported by Driver.exe)
+[test059] OK
+[test063] OK
+[test072] OK
+[test073] OK
+[test074] OK
+[test077] OK
+[test078] OK
+[test079] OK
+[test080] OK
+[test081] OK
+[test082] OK
+[test083] OK
+[test084] OK
+[test085] OK
+[test086] OK
+[test088] OK
+[test089] OK
+[test090] OK
+[test091] OK
+[test092] OK
+[test093] OK
+[test094] OK
+[test095] OK
+[test096] OK
+[test097] OK
+[test098] OK
+[test099] OK
+[test100] OK
+[test101] OK
+[test102] OK
+[test103] OK
+[test104] OK
+[test105] OK
+[test106] OK
+[test107] OK
+[test110] SKIPPED (not supported by Driver.exe)
+[test111] SKIPPED (not supported by Driver.exe)
+[test112] OK
+[test801] OK
+[test802] OK
+[test803] OK (expected runtime error caught: VM Error: write expects integer at 0x1d5)
+
+==========================================
+SUMMARY: Passed: 76, Failed: 0, Skipped: 3
+
+=== Testing corrupted input files diagnostics ===
+
+[OK] File too short (< 12 bytes): VM Error: Corrupted file '/tmp/tmpk2hhqwya.bc': size (3 bytes) is smaller than header (12 bytes)
+[OK] Negative header fields: VM Error: Corrupted header: negative field (stringtab=-5, globals=0, publics=0)
+[OK] Tables size exceeds file size: VM Error: Corrupted header: tables size (1102) exceeds file size (12)
+[OK] Non-null-terminated string table: VM Error: Corrupted string table: not null-terminated
+[OK] Missing 'main' public symbol: VM Error: Public function 'main' not found
+[OK] Invalid opcode 0xFE: VM Error: Unimplemented opcode 0xfe at 0x0
+[OK] Truncated CONST instruction: VM Error: Unexpected end of bytecode while reading int32 at offset 0x1 (code size: 2)
+[OK] Jump target out of bounds: VM Error: JMP target out of bounds at 0x0
+
+=== Performance comparison (3 tests) ===
+
+Test            | lamac -i (s)    | My VM (s)       | Speedup (vs -i) 
+-------------------------------------------------------------------------------------
+Fib             | 0.7256          | 0.0534          | 13.59x    
+Loop            | 1.3046          | 0.0123          | 105.92x   
+Sort            | 5.0055          | 2.0403          | 2.45x
