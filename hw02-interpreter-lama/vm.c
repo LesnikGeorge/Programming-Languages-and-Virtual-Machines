@@ -340,8 +340,10 @@ static inline void push_call_frame(int *csp, int ret_ip, int argc, aint *sp, int
 __attribute__((noinline))
 static void eval(const bytefile *bf, int start_offset) {
     // Границы стека передаем сборщику напрямую.
-    // Ассерт assert((__gc_stack_top & 0xF) == 0); выравнивания по 16 байт в runtime/runtime.c закоментил
     aint gc_operand_stack[OPERAND_STACK_CAPACITY];
+    
+    // Костыльно зануляем стек, иначе GC цепляет мусор в ячейке [sp - 1] и падает
+    memset(gc_operand_stack, 0, sizeof(gc_operand_stack));
 
     if (start_offset < 0 || start_offset >= bf->code_size) {
         vm_error("Entry point offset 0x%x is out of code bounds", start_offset);
@@ -352,22 +354,39 @@ static void eval(const bytefile *bf, int start_offset) {
 
     __gc_stack_bottom = (size_t)(gc_operand_stack + OPERAND_STACK_CAPACITY);
 
-    // Глобальные переменные располагаются в самом низу стека операндов [globals_base, __gc_stack_bottom)
+    // Глобальные переменные располагаются в самом низу стека операндов
     aint *globals_base = (aint *)__gc_stack_bottom - bf->global_area_size;
     for (int i = 0; i < bf->global_area_size; ++i) {
         globals_base[i] = BOX(0);
     }
 
-    aint *sp_base  = globals_base;
     aint *sp_limit = gc_operand_stack + 32;
-    aint *sp       = sp_base;
 
-    #define CHECK_PUSH(n) do { if (sp - (n) < sp_limit) vm_error("Operand stack overflow at 0x%x", insn_offset); } while(0)
-    #define CHECK_POP(n)  do { if (sp + (n) > sp_base)  vm_error("Operand stack underflow at 0x%x", insn_offset); } while(0)
+    // Держим стек прямо в __gc_stack_top с учетом интервала [top, bottom)
+    #define SP (((aint *)__gc_stack_top) + 1)
+    #define SET_SP(new_sp) (__gc_stack_top = (size_t)((aint *)(new_sp) - 1))
 
-    #define PUSH(v) do { CHECK_PUSH(1); *(--sp) = (aint)(v); } while(0)
-    #define POP()   ({ CHECK_POP(1); *(sp++); })
-    #define PEEK()  ({ CHECK_POP(1); *sp; })
+    SET_SP(globals_base);
+
+    #define CHECK_PUSH(n) do { if (SP - (n) < sp_limit) vm_error("Operand stack overflow at 0x%x", insn_offset); } while(0)
+    #define CHECK_POP(n)  do { if (SP + (n) > globals_base)  vm_error("Operand stack underflow at 0x%x", insn_offset); } while(0)
+
+    // Вычисляем v до сдвига SP, чтобы PUSH(POP()) не ломал стек
+    #define PUSH(v) do { \
+        aint _val_to_push = (aint)(v); \
+        CHECK_PUSH(1); \
+        SET_SP(SP - 1); \
+        *SP = _val_to_push; \
+    } while(0)
+
+    #define POP()   ({ \
+        CHECK_POP(1); \
+        aint _v = *SP; \
+        SET_SP(SP + 1); \
+        _v; \
+    })
+    
+    #define PEEK()  ({ CHECK_POP(1); *SP; })
 
     // Фейковые аргументы для точки входа main
     const int main_argc = 2;
@@ -377,7 +396,7 @@ static void eval(const bytefile *bf, int start_offset) {
     }
 
     int csp = -1;
-    push_call_frame(&csp, -1, main_argc, sp, 0, start_offset);
+    push_call_frame(&csp, -1, main_argc, SP, 0, start_offset);
 
     int ip = start_offset;
 
@@ -393,7 +412,7 @@ static void eval(const bytefile *bf, int start_offset) {
             aint y = POP();
             aint x = POP();
 
-            if (l == BINOP_EQ) { // == (единственный бинарник, работающий с объектами)
+            if (l == BINOP_EQ) { 
                 if (UNBOXED(x) && UNBOXED(y)) PUSH(BOX(UNBOX(x) == UNBOX(y)));
                 else if (UNBOXED(x) || UNBOXED(y)) PUSH(BOX(0));
                 else vm_error("Invalid operands for '==' at 0x%x: comparing two boxed values", insn_offset);
@@ -487,10 +506,6 @@ static void eval(const bytefile *bf, int start_offset) {
             case OP_STRING: {
                 const char *s = get_string(bf, read_int32(bf, &ip), insn_offset);
                 aint arg = (aint)s;
-                // Перед аллокацией в куче (Bstring, Bclosure, Bsexp, Barray) может сработать GC.
-                // Стек растет вниз, поэтому выставляем __gc_stack_top = sp - 1, 
-                // чтобы сборщик мусора просканировал все операнды на стеке как корни (roots).
-                __gc_stack_top = (size_t)(sp - 1); // Регистрируем корни стека для GC перед аллокацией
                 PUSH((aint)Bstring(&arg));
                 break;
             }
@@ -502,22 +517,19 @@ static void eval(const bytefile *bf, int start_offset) {
                 const char *tag_str = get_string(bf, tag_offset, insn_offset);
                 CHECK_POP(n);
 
-                
                 for (int i = 0; i < n / 2; ++i) {
-                    aint tmp = sp[i];
-                    sp[i] = sp[n - 1 - i];
-                    sp[n - 1 - i] = tmp;
+                    aint tmp = SP[i];
+                    SP[i] = SP[n - 1 - i];
+                    SP[n - 1 - i] = tmp;
                 }
                 
                 CHECK_PUSH(1);
-                sp--;
-                for (int i = 0; i < n; ++i) sp[i] = sp[i + 1];
-                sp[n] = LtagHash((char *)tag_str);
+                SET_SP(SP - 1); // Место под тег
+                for (int i = 0; i < n; ++i) SP[i] = SP[i + 1];
+                SP[n] = LtagHash((char *)tag_str);
 
-                // Аргументы остаются на стеке выше __gc_stack_top, чтобы GC видел их как корни
-                __gc_stack_top = (size_t)(sp - 1); // Регистрируем корни стека для GC перед аллокацией 
-                void *res = Bsexp(sp, BOX(n + 1));
-                sp += (n + 1);
+                void *res = Bsexp(SP, BOX(n + 1));
+                SET_SP(SP + n + 1);
                 PUSH((aint)res);
                 break;
             }
@@ -534,11 +546,9 @@ static void eval(const bytefile *bf, int start_offset) {
                 aint idx = POP();
                 if (UNBOXED(idx)) {
                     aint obj = POP();
-                    __gc_stack_top = (size_t)(sp - 1); // Регистрируем корни стека для GC перед аллокацией
                     PUSH((aint)Bsta((void *)obj, idx, (void *)val));
                 } else {
                     if (idx == 0) vm_error("Null reference in STA at 0x%x", insn_offset);
-                    __gc_stack_top = (size_t)(sp - 1); // Регистрируем корни стека для GC перед аллокацией
                     PUSH((aint)Bsta(NULL, idx, (void *)val));
                 }
                 break;
@@ -553,7 +563,7 @@ static void eval(const bytefile *bf, int start_offset) {
             case OP_RET: {
                 aint ret_val = POP();
                 call_frame *frame = &call_stack[csp];
-                sp = frame->saved_sp;
+                SET_SP(frame->saved_sp);
                 if (frame->ret_ip == -1) return; // Возврат из main
 
                 ip = frame->ret_ip;
@@ -579,7 +589,6 @@ static void eval(const bytefile *bf, int start_offset) {
             case OP_ELEM: {
                 aint idx = POP();
                 aint obj = POP();
-                __gc_stack_top = (size_t)(sp - 1); // Регистрируем корни стека для GC перед аллокацией
                 PUSH((aint)Belem((void *)obj, idx));
                 break;
             }
@@ -607,7 +616,7 @@ static void eval(const bytefile *bf, int start_offset) {
                 if (frame->argc != nargs) vm_error("Arity mismatch: expected %d, got %d", nargs, frame->argc);
 
                 frame->locals = nlocals;
-                frame->locals_ptr = sp - 1;
+                frame->locals_ptr = SP - 1;
 
                 CHECK_PUSH(nlocals);
                 for (int i = 0; i < nlocals; ++i) {
@@ -625,8 +634,8 @@ static void eval(const bytefile *bf, int start_offset) {
                 aint cur_closure = frame_get_closure(frame);
                 CHECK_PUSH(n + 1);
 
-                sp -= (n + 1);
-                sp[0] = BOX(target);
+                SET_SP(SP - (n + 1));
+                SP[0] = BOX(target);
 
                 for (int i = 0; i < n; ++i) {
                     unsigned char dtype = read_byte(bf, &ip);
@@ -651,12 +660,11 @@ static void eval(const bytefile *bf, int start_offset) {
                         default:
                             vm_error("Unknown designation %d in CLOSURE at 0x%x", dtype, insn_offset);
                     }
-                    sp[i + 1] = val;
+                    SP[i + 1] = val;
                 }
 
-                __gc_stack_top = (size_t)(sp - 1); // Регистрируем корни стека для GC перед аллокацией
-                void *res = Bclosure(sp, BOX(n));
-                sp += (n + 1);
+                void *res = Bclosure(SP, BOX(n));
+                SET_SP(SP + n + 1);
                 PUSH((aint)res);
                 break;
             }
@@ -665,14 +673,14 @@ static void eval(const bytefile *bf, int start_offset) {
                 if (argc < 0) vm_error("Negative arity %d in CALLC at 0x%x", argc, insn_offset);
                 CHECK_POP(argc + 1);
 
-                aint closure = sp[argc];
+                aint closure = SP[argc];
                 if (UNBOXED(closure) || closure == 0) vm_error("CALLC on non-closure at 0x%x", insn_offset);
                 if (TAG(TO_DATA((void *)closure)->data_header) != CLOSURE_TAG) vm_error("Not a closure at 0x%x", insn_offset);
 
                 int target = (int)UNBOX(((aint *)closure)[0]);
                 if (target < 0 || target >= bf->code_size) vm_error("Closure target out of bounds at 0x%x", insn_offset);
 
-                push_call_frame(&csp, ip, argc, sp, 1, insn_offset);
+                push_call_frame(&csp, ip, argc, SP, 1, insn_offset);
                 ip = target;
                 break;
             }
@@ -683,7 +691,7 @@ static void eval(const bytefile *bf, int start_offset) {
                 if (argc < 0) vm_error("Negative arity in CALL at 0x%x", insn_offset);
                 CHECK_POP(argc);
 
-                push_call_frame(&csp, ip, argc, sp, 0, insn_offset);
+                push_call_frame(&csp, ip, argc, SP, 0, insn_offset);
                 ip = target;
                 break;
             }
@@ -693,13 +701,15 @@ static void eval(const bytefile *bf, int start_offset) {
                 if (n < 0) vm_error("Negative arity %d in TAG at 0x%x", n, insn_offset);
                 
                 const char *tag_str = get_string(bf, tag_offset, insn_offset);
-                PUSH(Btag((void *)POP(), LtagHash((char *)tag_str), BOX(n)));
+                aint val = POP();
+                PUSH(Btag((void *)val, LtagHash((char *)tag_str), BOX(n)));
                 break;
             }
             case OP_ARRAY: {
                 int n = read_int32(bf, &ip);
                 if (n < 0) vm_error("Negative size %d in ARRAY at 0x%x", n, insn_offset);
-                PUSH(Barray_patt((void *)POP(), BOX(n)));
+                aint val = POP();
+                PUSH(Barray_patt((void *)val, BOX(n)));
                 break;
             }
             case OP_FAIL: {
@@ -729,9 +739,8 @@ static void eval(const bytefile *bf, int start_offset) {
             }
             case OP_CALL_STRING: {
                 CHECK_POP(1);
-                __gc_stack_top = (size_t)(sp - 1); // Регистрируем корни стека для GC перед аллокацией
-                void *res = Lstring(sp);
-                sp[0] = (aint)res;
+                void *res = Lstring(SP);
+                SP[0] = (aint)res;
                 break;
             }
             case OP_CALL_ARRAY: {
@@ -740,14 +749,13 @@ static void eval(const bytefile *bf, int start_offset) {
                 CHECK_POP(n);
 
                 for (int i = 0; i < n / 2; ++i) {
-                    aint tmp = sp[i];
-                    sp[i] = sp[n - 1 - i];
-                    sp[n - 1 - i] = tmp;
+                    aint tmp = SP[i];
+                    SP[i] = SP[n - 1 - i];
+                    SP[n - 1 - i] = tmp;
                 }
 
-                __gc_stack_top = (size_t)(sp - 1); // Регистрируем корни стека для GC перед аллокацией
-                void *res = Barray(sp, BOX(n));
-                sp += n;
+                void *res = Barray(SP, BOX(n));
+                SET_SP(SP + n);
                 PUSH((aint)res);
                 break;
             }

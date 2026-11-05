@@ -85,7 +85,7 @@ SUMMARY: Passed: 76, Failed: 0, Skipped: 3
 
 === Testing corrupted input files diagnostics ===
 
-[OK] File too short (< 12 bytes): VM Error: Corrupted file '/tmp/tmpc5urmxbr.bc': size (3 bytes) is smaller than header (12 bytes)
+[OK] File too short (< 12 bytes): VM Error: Corrupted file '/tmp/tmp8q3aghek.bc': size (3 bytes) is smaller than header (12 bytes)
 [OK] Negative header fields: VM Error: Corrupted header: negative field (stringtab=-5, globals=0, publics=0)
 [OK] Tables size exceeds file size: VM Error: Corrupted header: tables size (1102) exceeds file size (12)
 [OK] Non-null-terminated string table: VM Error: Corrupted string table: not null-terminated
@@ -98,6 +98,6 @@ SUMMARY: Passed: 76, Failed: 0, Skipped: 3
 
 Test            | lamac -i (s)    | My VM (s)       | Speedup (vs -i) 
 -------------------------------------------------------------------------------------
-Fib             | 0.9381          | 0.0712          | 13.17x    
-Loop            | 1.7193          | 0.0137          | 125.51x   
-Sort            | 6.8753          | 2.3260          | 2.96x
+Fib             | 0.7365          | 0.0606          | 12.16x    
+Loop            | 1.2532          | 0.0142          | 88.51x    
+Sort            | 5.3884          | 2.1873          | 2.46x
