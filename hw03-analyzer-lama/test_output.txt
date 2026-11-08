@@ -1,0 +1,315 @@
+lesnik@lesnik-NMH-WDX9:~/Documents/YP_VM/Programming-Languages-and-Virtual-Machines/hw03-analyzer-lama$ gcc -O3 -m64 -Iruntime analyzer.c ~/Documents/YP_VM/Lama/_build/default/runtime/runtime.a -o analyzer
+lesnik@lesnik-NMH-WDX9:~/Documents/YP_VM/Programming-Languages-and-Virtual-Machines/hw03-analyzer-lama$ python3 run_tests.py
+=== Running regression (smoke) tests (79 files) ===
+
+[test001] OK
+[test002] OK
+[test003] OK
+[test004] OK
+[test005] OK
+[test006] OK
+[test007] OK
+[test008] OK
+[test009] OK
+[test010] OK
+[test011] OK
+[test012] OK
+[test013] OK
+[test014] OK
+[test015] OK
+[test016] OK
+[test017] OK
+[test018] OK
+[test019] OK
+[test020] OK
+[test021] OK
+[test022] OK
+[test023] OK
+[test024] OK
+[test025] OK
+[test026] OK
+[test027] OK
+[test028] OK
+[test029] OK
+[test034] OK
+[test036] OK
+[test040] OK
+[test041] OK
+[test042] OK
+[test045] OK
+[test046] OK
+[test050] OK
+[test054] SKIPPED (not supported by Driver.exe)
+[test059] OK
+[test063] OK
+[test072] OK
+[test073] OK
+[test074] OK
+[test077] OK
+[test078] OK
+[test079] OK
+[test080] OK
+[test081] OK
+[test082] OK
+[test083] OK
+[test084] OK
+[test085] OK
+[test086] OK
+[test088] OK
+[test089] OK
+[test090] OK
+[test091] OK
+[test092] OK
+[test093] OK
+[test094] OK
+[test095] OK
+[test096] OK
+[test097] OK
+[test098] OK
+[test099] OK
+[test100] OK
+[test101] OK
+[test102] OK
+[test103] OK
+[test104] OK
+[test105] OK
+[test106] OK
+[test107] OK
+[test110] SKIPPED (not supported by Driver.exe)
+[test111] SKIPPED (not supported by Driver.exe)
+[test112] OK
+[test801] OK
+[test802] OK
+[test803] OK
+
+==========================================
+SUMMARY: Passed: 76, Failed: 0, Skipped: 3
+
+=== Testing corrupted input files diagnostics ===
+
+[OK] File too short (< 12 bytes): VM Error: Corrupted file '/tmp/tmpk7lwmva9.bc': size (3 bytes) is smaller than header (12 bytes)
+[OK] Negative header fields: VM Error: Corrupted header: negative field (stringtab=-5, globals=0, publics=0)
+[OK] Tables size exceeds file size: VM Error: Corrupted header: tables size (1102) exceeds file size (12)
+[OK] Non-null-terminated string table: VM Error: Corrupted string table: not null-terminated
+[OK] Truncated instruction (CONST): VM Error: Unexpected end of bytecode while reading int32 at offset 0x1 (code size: 2)
+[OK] String offset out of bounds: VM Error: String offset 9999 out of bounds [0, 5) at instruction offset 0x0
+
+=== Performance Tests Target Analysis (3 files) ===
+
+[Fib] Analyzed in 0.0011 seconds. N-grams output:
+
+
+=== Top 1-grams ===
+       3  CALL (argc: 1)
+       3  CONST 1
+       3  LD A[0]
+       2  BINOP -
+       2  END
+       2  JMP
+       1  BEGIN 1 0
+       1  BEGIN 2 0
+       1  BINOP +
+       1  BINOP <=
+       1  CALL_WRITE
+       1  CJMPZ
+       1  CONST 2
+       1  CONST 28
+       1  STOP
+
+=== Top 2-grams ===
+       2  BINOP - -> CALL (argc: 1)
+       2  LD A[0] -> CONST 1
+       1  BEGIN 1 0 -> LD A[0]
+       1  BEGIN 2 0 -> CONST 28
+       1  BINOP + -> JMP
+       1  BINOP <= -> CJMPZ
+       1  CALL (argc: 1) -> BINOP +
+       1  CALL (argc: 1) -> CALL_WRITE
+       1  CALL (argc: 1) -> LD A[0]
+       1  CALL_WRITE -> END
+       1  CONST 1 -> BINOP -
+       1  CONST 1 -> BINOP <=
+       1  CONST 1 -> JMP
+       1  CONST 2 -> BINOP -
+       1  CONST 28 -> CALL (argc: 1)
+       1  LD A[0] -> CONST 2
+
+--------------------------------------------------
+[Loop] Analyzed in 0.0016 seconds. N-grams output:
+
+
+=== Top 1-grams ===
+       6  DROP
+       3  BINOP +
+       3  CONST 0
+       3  LD G[1]
+       3  LD G[2]
+       2  BINOP <
+       2  CJMPNZ
+       2  CONST 1
+       2  CONST 400
+       2  JMP
+       2  LD G[0]
+       2  ST G[0]
+       2  ST G[1]
+       2  ST G[2]
+       1  BEGIN 2 0
+       1  BINOP %
+       1  BINOP *
+       1  CALL_WRITE
+       1  CONST 1000000007
+       1  END
+       1  STOP
+
+=== Top 2-grams ===
+       2  BINOP < -> CJMPNZ
+       2  CONST 1 -> BINOP +
+       2  CONST 400 -> BINOP <
+       2  DROP -> JMP
+       2  ST G[0] -> DROP
+       2  ST G[1] -> DROP
+       2  ST G[2] -> DROP
+       1  BEGIN 2 0 -> CONST 0
+       1  BINOP % -> ST G[0]
+       1  BINOP * -> BINOP +
+       1  BINOP + -> CONST 1000000007
+       1  BINOP + -> ST G[1]
+       1  BINOP + -> ST G[2]
+       1  CALL_WRITE -> END
+       1  CONST 0 -> ST G[0]
+       1  CONST 0 -> ST G[1]
+       1  CONST 0 -> ST G[2]
+       1  CONST 1000000007 -> BINOP %
+       1  DROP -> CONST 0
+       1  DROP -> LD G[2]
+       1  LD G[0] -> CALL_WRITE
+       1  LD G[0] -> LD G[1]
+       1  LD G[1] -> CONST 1
+       1  LD G[1] -> CONST 400
+       1  LD G[1] -> LD G[2]
+       1  LD G[2] -> BINOP *
+       1  LD G[2] -> CONST 1
+       1  LD G[2] -> CONST 400
+
+--------------------------------------------------
+[Sort] Analyzed in 0.0017 seconds. N-grams output:
+
+
+=== Top 1-grams ===
+      31  DROP
+      28  DUP
+      21  ELEM
+      16  CONST 1
+      15  JMP
+      11  CONST 0
+       8  CALL (argc: 1)
+       7  LD A[0]
+       5  CJMPNZ
+       5  END
+       4  CJMPZ
+       4  SEXP 'cons' 2
+       3  ARRAY 2
+       3  CALL_ARRAY 2
+       3  LD L[0]
+       3  LD L[3]
+       3  ST L[0]
+       2  BEGIN 1 0
+       2  BINOP ==
+       2  LD L[1]
+       2  TAG 'cons' 2
+       1  BEGIN 1 1
+       1  BEGIN 1 6
+       1  BEGIN 2 0
+       1  BINOP -
+       1  BINOP >
+       1  CONST 1000
+       1  FAIL 14:9
+       1  FAIL 7:17
+       1  LD L[2]
+       1  LD L[4]
+       1  LD L[5]
+       1  ST L[1]
+       1  ST L[2]
+       1  ST L[3]
+       1  ST L[4]
+       1  ST L[5]
+       1  STOP
+
+=== Top 2-grams ===
+      13  CONST 1 -> ELEM
+      11  DROP -> DUP
+      11  DUP -> CONST 1
+      10  DROP -> DROP
+       8  CONST 0 -> ELEM
+       7  DUP -> CONST 0
+       7  ELEM -> DROP
+       5  DROP -> JMP
+       4  DUP -> DUP
+       3  ARRAY 2 -> CJMPNZ
+       3  CALL_ARRAY 2 -> JMP
+       3  DUP -> ARRAY 2
+       3  ELEM -> ST L[0]
+       3  ST L[0] -> DROP
+       2  BEGIN 1 0 -> LD A[0]
+       2  BINOP == -> CJMPZ
+       2  CALL (argc: 1) -> DUP
+       2  CALL (argc: 1) -> END
+       2  DROP -> LD L[0]
+       2  DUP -> TAG 'cons' 2
+       2  ELEM -> CONST 0
+       2  ELEM -> CONST 1
+       2  LD A[0] -> CALL (argc: 1)
+       2  SEXP 'cons' 2 -> CALL_ARRAY 2
+       2  TAG 'cons' 2 -> CJMPNZ
+       1  BEGIN 1 1 -> LD A[0]
+       1  BEGIN 1 6 -> LD A[0]
+       1  BEGIN 2 0 -> CONST 1000
+       1  BINOP - -> CALL (argc: 1)
+       1  BINOP > -> CJMPZ
+       1  CALL (argc: 1) -> CALL (argc: 1)
+       1  CALL (argc: 1) -> CONST 1
+       1  CALL (argc: 1) -> JMP
+       1  CALL (argc: 1) -> SEXP 'cons' 2
+       1  CONST 0 -> BINOP ==
+       1  CONST 0 -> JMP
+       1  CONST 0 -> LD A[0]
+       1  CONST 1 -> BINOP -
+       1  CONST 1 -> BINOP ==
+       1  CONST 1 -> LD L[1]
+       1  CONST 1000 -> CALL (argc: 1)
+       1  DROP -> CONST 0
+       1  DROP -> LD L[3]
+       1  DROP -> LD L[5]
+       1  DUP -> DROP
+       1  ELEM -> DUP
+       1  ELEM -> SEXP 'cons' 2
+       1  ELEM -> ST L[1]
+       1  ELEM -> ST L[2]
+       1  ELEM -> ST L[3]
+       1  ELEM -> ST L[4]
+       1  ELEM -> ST L[5]
+       1  LD A[0] -> CALL_ARRAY 2
+       1  LD A[0] -> CJMPZ
+       1  LD A[0] -> CONST 1
+       1  LD A[0] -> DUP
+       1  LD A[0] -> LD A[0]
+       1  LD L[0] -> CALL (argc: 1)
+       1  LD L[0] -> JMP
+       1  LD L[0] -> SEXP 'cons' 2
+       1  LD L[1] -> BINOP >
+       1  LD L[1] -> LD L[3]
+       1  LD L[2] -> CALL (argc: 1)
+       1  LD L[3] -> LD L[0]
+       1  LD L[3] -> LD L[1]
+       1  LD L[3] -> LD L[4]
+       1  LD L[4] -> SEXP 'cons' 2
+       1  LD L[5] -> LD L[3]
+       1  SEXP 'cons' 2 -> CALL (argc: 1)
+       1  SEXP 'cons' 2 -> JMP
+       1  ST L[1] -> DROP
+       1  ST L[2] -> DROP
+       1  ST L[3] -> DROP
+       1  ST L[4] -> DROP
+       1  ST L[5] -> DROP
+
+--------------------------------------------------
