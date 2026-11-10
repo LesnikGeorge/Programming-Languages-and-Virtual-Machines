@@ -5,7 +5,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <assert.h>
+
 
 typedef struct __attribute__((packed)) {
     int32_t name_offset;
@@ -41,33 +41,27 @@ _Noreturn static void vm_error(const char *fmt, ...) {
     exit(EXIT_FAILURE);
 }
 
-static inline unsigned char read_byte(const bytefile *bf, int *ip_offset) {
-    if (*ip_offset < 0 || *ip_offset >= bf->code_size) {
-        vm_error("Unexpected end of bytecode at offset 0x%x (code size: %d)",
-                 *ip_offset, bf->code_size);
-    }
-    unsigned char b = (unsigned char)bf->code_ptr[*ip_offset];
-    (*ip_offset) += 1;
-    return b;
+static void *checked_malloc(size_t size) {
+    void *ptr = malloc(size);
+    if (!ptr && size != 0) vm_error("Out of memory");
+    return ptr;
 }
 
-static inline int read_int32(const bytefile *bf, int *ip_offset) {
-    if (*ip_offset < 0 || *ip_offset + (int)sizeof(int32_t) > bf->code_size) {
+static void *checked_calloc(size_t count, size_t size) {
+    void *ptr = calloc(count, size);
+    if (!ptr && count != 0 && size != 0) vm_error("Out of memory");
+    return ptr;
+}
+
+static inline int32_t read_int32_at(const bytefile *bf, int offset, int insn_offset) {
+    if (offset < 0 || (int64_t)offset + (int64_t)sizeof(int32_t) > bf->code_size) {
         vm_error("Unexpected end of bytecode while reading int32 at offset 0x%x (code size: %d)",
-                 *ip_offset, bf->code_size);
+                 insn_offset, bf->code_size);
     }
-    int32_t val = 0;
-    memcpy(&val, bf->code_ptr + *ip_offset, sizeof(int32_t));
-    (*ip_offset) += (int)sizeof(int32_t);
-    return (int)val;
-}
 
-static inline const char *get_string(const bytefile *bf, int offset, int insn_offset) {
-    if (offset < 0 || offset >= bf->stringtab_size) {
-        vm_error("String offset %d out of bounds [0, %d) at instruction offset 0x%x",
-                 offset, bf->stringtab_size, insn_offset);
-    }
-    return &bf->string_ptr[offset];
+    int32_t value;
+    memcpy(&value, bf->code_ptr + offset, sizeof(value));
+    return value;
 }
 
 static inline const public_entry *get_public_entry(const bytefile *bf, int i) {
@@ -101,17 +95,13 @@ static bytefile *read_file(const char *fname) {
                  fname, (long long)file_size);
     }
 
-    char *raw = (char *)malloc((size_t)file_size);
-    if (!raw) vm_error("Out of memory allocating %lld bytes", (long long)file_size);
-
+    char *raw = (char *)checked_malloc((size_t)file_size);
     if (fread(raw, 1, (size_t)file_size, f) != (size_t)file_size) {
         vm_error("Failed to read file '%s'", fname);
     }
     fclose(f);
 
-    bytefile *bf = (bytefile *)calloc(1, sizeof(bytefile));
-    if (!bf) vm_error("Out of memory");
-
+    bytefile *bf = (bytefile *)checked_calloc(1, sizeof(bytefile));
     bf->filename = fname;
     bf->raw_data = raw;
 
@@ -204,255 +194,413 @@ typedef enum {
     OP_STOP       = 0xFF
 } opcode_t;
 
+// Учитываем все возможные одиночные ключи и пары байтовых ключей
+#define NGRAM_KEY_COUNT (256 + 256 * 256)
+#define NGRAM_PAIR_BASE 256
+
+typedef struct {
+    uint64_t count;
+    uint8_t used;
+} NgramFreq;
+
 typedef struct {
     int ip;
-    char str[256];     // Буфер с запасом под список захваченных переменных в CLOSURE
-    int is_terminator; // Разрывает цепочку после себя (JMP, RET, FAIL, STOP, CJMP)
-    int is_label;      // Точка входа (цель прыжка/вызова или паблик)
-    int is_ignored;    // Служебные инструкции (LINE)
-} Instruction;
+    int next_ip;
+    int target;
+    uint8_t key;
+    uint8_t is_branch;
+    uint8_t is_conditional;
+    uint8_t is_terminal;
+    uint8_t has_target;
+} DecodedInsn;
 
 typedef struct {
-    char *str;
-    int count;
-} Freq;
+    int *data;
+    size_t count;
+    size_t capacity;
+} IntQueue;
 
-static int compare_str(const void *a, const void *b) {
-    return strcmp(*(const char **)a, *(const char **)b);
+static void queue_push(IntQueue *queue, int value) {
+    if (queue->count == queue->capacity) {
+        size_t new_capacity = queue->capacity == 0 ? 64 : queue->capacity * 2;
+        if (new_capacity < queue->capacity ||
+            new_capacity > SIZE_MAX / sizeof(int)) {
+            vm_error("Too many reachable instructions");
+        }
+
+        int *new_data = (int *)realloc(queue->data, new_capacity * sizeof(int));
+        if (!new_data) vm_error("Out of memory in analyzer");
+
+        queue->data = new_data;
+        queue->capacity = new_capacity;
+    }
+
+    queue->data[queue->count++] = value;
 }
 
-static int compare_freq(const void *a, const void *b) {
-    Freq *fa = (Freq *)a;
-    Freq *fb = (Freq *)b;
-    if (fa->count != fb->count) return fb->count - fa->count;
-    return strcmp(fa->str, fb->str);
+static int queue_pop(IntQueue *queue, size_t *head) {
+    return queue->data[(*head)++];
 }
 
-static void count_and_print(char **ngrams, int count, const char *title) {
-    if (count == 0) return;
-    
-    qsort(ngrams, count, sizeof(char*), compare_str);
+static void check_target(const bytefile *bf, int target, int insn_ip) {
+    if (target < 0 || target >= bf->code_size) {
+        vm_error("Control-flow target %d out of bounds at instruction offset 0x%x",
+                 target, insn_ip);
+    }
+}
 
-    Freq *freqs = malloc(count * sizeof(Freq));
-    if (!freqs) vm_error("Out of memory in analyzer");
-    int unique = 0;
+// Читает только длину инструкции и необходимые для CFG адреса.
+// Значения операндов не участвуют в ключе инструкции.
+static DecodedInsn decode_instruction(const bytefile *bf, int ip) {
+    if (ip < 0 || ip >= bf->code_size) {
+        vm_error("Instruction offset 0x%x out of code bounds", ip);
+    }
 
-    freqs[0].str = ngrams[0];
-    freqs[0].count = 1;
-    unique = 1;
+    DecodedInsn ins;
+    memset(&ins, 0, sizeof(ins));
+    ins.ip = ip;
+    ins.target = -1;
+    ins.key = (uint8_t)bf->code_ptr[ip];
 
-    for (int i = 1; i < count; ++i) {
-        if (strcmp(ngrams[i], ngrams[i-1]) == 0) {
-            freqs[unique-1].count++;
-        } else {
-            freqs[unique].str = ngrams[i];
-            freqs[unique].count = 1;
-            unique++;
+    unsigned char op = (unsigned char)bf->code_ptr[ip];
+    unsigned char h = (op & 0xF0) >> 4;
+    unsigned char l = op & 0x0F;
+    int cursor = ip + 1;
+
+    if (h == H_BINOP) {
+        if (l < 1 || l > 13) {
+            vm_error("Unknown binary opcode 0x%02x at offset 0x%x", op, ip);
+        }
+    } else if (h == H_LD || h == H_LDA || h == H_ST) {
+        if (l > VAR_CLOSURE) {
+            vm_error("Unknown variable location in opcode 0x%02x at offset 0x%x", op, ip);
+        }
+        (void)read_int32_at(bf, cursor, ip);
+        cursor += 4;
+    } else if (h == H_PATT) {
+        if (l > 6) {
+            vm_error("Unknown pattern opcode 0x%02x at offset 0x%x", op, ip);
+        }
+    } else {
+        switch (op) {
+            case OP_CONST:
+            case OP_STRING:
+            case OP_JMP:
+            case OP_CJMPZ:
+            case OP_CJMPNZ:
+            case OP_CALLC:
+            case OP_ARRAY:
+            case OP_LINE:
+            case OP_CALL_ARRAY:
+                (void)read_int32_at(bf, cursor, ip);
+                if (op == OP_JMP || op == OP_CJMPZ || op == OP_CJMPNZ) {
+                    ins.target = (int)read_int32_at(bf, cursor, ip);
+                    ins.has_target = 1;
+                    ins.is_branch = 1;
+                    ins.is_conditional = (op != OP_JMP);
+                    check_target(bf, ins.target, ip);
+                }
+                cursor += 4;
+                break;
+
+            case OP_SEXP:
+            case OP_BEGIN:
+            case OP_CBEGIN:
+            case OP_TAG:
+                (void)read_int32_at(bf, cursor, ip);
+                (void)read_int32_at(bf, cursor + 4, ip);
+                cursor += 8;
+                break;
+
+            case OP_CALL: {
+                ins.target = (int)read_int32_at(bf, cursor, ip);
+                (void)read_int32_at(bf, cursor + 4, ip);
+                ins.has_target = 1;
+                check_target(bf, ins.target, ip);
+                cursor += 8;
+                break;
+            }
+
+            case OP_CLOSURE: {
+                int target = (int)read_int32_at(bf, cursor, ip);
+                int n = (int)read_int32_at(bf, cursor + 4, ip);
+                if (n < 0) vm_error("Negative closure size %d at offset 0x%x", n, ip);
+                check_target(bf, target, ip);
+
+                int64_t end = (int64_t)cursor + 8 + (int64_t)n * 5;
+                if (end > bf->code_size) {
+                    vm_error("Unexpected end of bytecode while reading CLOSURE at offset 0x%x",
+                             ip);
+                }
+
+                ins.target = target;
+                ins.has_target = 1;
+                cursor = (int)end;
+                break;
+            }
+
+            case OP_FAIL:
+                (void)read_int32_at(bf, cursor, ip);
+                (void)read_int32_at(bf, cursor + 4, ip);
+                cursor += 8;
+                ins.is_terminal = 1;
+                break;
+
+            case OP_END:
+            case OP_RET:
+            case OP_STOP:
+                ins.is_terminal = 1;
+                break;
+
+            case OP_STI:
+            case OP_STA:
+            case OP_DROP:
+            case OP_DUP:
+            case OP_SWAP:
+            case OP_ELEM:
+            case OP_CALL_READ:
+            case OP_CALL_WRITE:
+            case OP_CALL_LENGTH:
+            case OP_CALL_STRING:
+                break;
+
+            default:
+                vm_error("Unknown opcode 0x%02x at offset 0x%x", op, ip);
         }
     }
 
-    qsort(freqs, unique, sizeof(Freq), compare_freq);
+    if (op == OP_JMP) ins.is_terminal = 1;
 
-    printf("\n=== %s ===\n", title);
-    for (int i = 0; i < unique; ++i) {
-        printf("%8d  %s\n", freqs[i].count, freqs[i].str);
+    if (cursor > bf->code_size) {
+        vm_error("Instruction at offset 0x%x extends beyond code section", ip);
     }
+    if (cursor == ip) {
+        vm_error("Invalid instruction size at offset 0x%x", ip);
+    }
+
+    ins.next_ip = cursor;
+    return ins;
+}
+
+// Обходит достижимый код от публичных символов и отмечает начала инструкций
+static uint8_t *find_reachable_code(const bytefile *bf, uint8_t *labels) {
+    uint8_t *starts = (uint8_t *)checked_calloc((size_t)bf->code_size, 1);
+    IntQueue queue = {0};
+    size_t head = 0;
+
+    for (int i = 0; i < bf->public_symbols_number; ++i) {
+        int offset = get_public_offset(bf, i);
+        check_target(bf, offset, -1);
+        labels[offset] = 1;
+        queue_push(&queue, offset);
+    }
+
+    while (head < queue.count) {
+        int ip = queue_pop(&queue, &head);
+        if (starts[ip]) continue;
+
+        DecodedInsn ins = decode_instruction(bf, ip);
+        starts[ip] = 1;
+
+        if (ins.has_target) {
+            labels[ins.target] = 1;
+            queue_push(&queue, ins.target);
+        }
+
+        if (ins.is_branch && !ins.is_conditional) {
+            continue;
+        }
+
+        if (!ins.is_terminal && ins.next_ip < bf->code_size) {
+            queue_push(&queue, ins.next_ip);
+        }
+    }
+
+    free(queue.data);
+    return starts;
+}
+
+static unsigned int make_pair_key(uint8_t first, uint8_t second) {
+    return NGRAM_PAIR_BASE + ((unsigned int)first << 8) + second;
+}
+
+static void add_frequency(NgramFreq *freqs, unsigned int key) {
+    if (key >= NGRAM_KEY_COUNT) {
+        vm_error("Internal error: n-gram key out of range");
+    }
+
+    freqs[key].used = 1;
+    if (freqs[key].count == UINT64_MAX) {
+        vm_error("Frequency counter overflow");
+    }
+    freqs[key].count++;
+}
+
+static const char *opcode_name(unsigned char op) {
+    static char name[32];
+
+    unsigned char h = (op & 0xF0) >> 4;
+    unsigned char l = op & 0x0F;
+
+    if (h == H_BINOP) {
+        static const char *binops[] = {
+            "INVALID", "+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "||"
+        };
+        return binops[l];
+    }
+
+    if (h == H_LD || h == H_LDA || h == H_ST) {
+        static const char *locations[] = {"G", "L", "A", "C"};
+        const char *kind = h == H_LD ? "LD" : h == H_LDA ? "LDA" : "ST";
+        snprintf(name, sizeof(name), "%s_%s", kind, locations[l]);
+        return name;
+    }
+
+    if (h == H_PATT) {
+        static const char *patterns[] = {
+            "PATT_STRCMP", "PATT_STRING", "PATT_ARRAY", "PATT_SEXP",
+            "PATT_BOXED", "PATT_UNBOXED", "PATT_CLOSURE"
+        };
+        return patterns[l];
+    }
+
+    switch (op) {
+        case OP_CONST: return "CONST";
+        case OP_STRING: return "STRING";
+        case OP_SEXP: return "SEXP";
+        case OP_STI: return "STI";
+        case OP_STA: return "STA";
+        case OP_JMP: return "JMP";
+        case OP_END: return "END";
+        case OP_RET: return "RET";
+        case OP_DROP: return "DROP";
+        case OP_DUP: return "DUP";
+        case OP_SWAP: return "SWAP";
+        case OP_ELEM: return "ELEM";
+        case OP_CJMPZ: return "CJMPZ";
+        case OP_CJMPNZ: return "CJMPNZ";
+        case OP_BEGIN: return "BEGIN";
+        case OP_CBEGIN: return "CBEGIN";
+        case OP_CLOSURE: return "CLOSURE";
+        case OP_CALLC: return "CALLC";
+        case OP_CALL: return "CALL";
+        case OP_TAG: return "TAG";
+        case OP_ARRAY: return "ARRAY";
+        case OP_FAIL: return "FAIL";
+        case OP_LINE: return "LINE";
+        case OP_CALL_READ: return "CALL_READ";
+        case OP_CALL_WRITE: return "CALL_WRITE";
+        case OP_CALL_LENGTH: return "CALL_LENGTH";
+        case OP_CALL_STRING: return "CALL_STRING";
+        case OP_CALL_ARRAY: return "CALL_ARRAY";
+        case OP_STOP: return "STOP";
+        default:
+            snprintf(name, sizeof(name), "OP_0x%02X", op);
+            return name;
+    }
+}
+
+typedef struct {
+    unsigned int key;
+    uint64_t count;
+} SortedFreq;
+
+static int compare_freq(const void *a, const void *b) {
+    const SortedFreq *fa = (const SortedFreq *)a;
+    const SortedFreq *fb = (const SortedFreq *)b;
+
+    if (fa->count < fb->count) return 1;
+    if (fa->count > fb->count) return -1;
+    if (fa->key < fb->key) return -1;
+    if (fa->key > fb->key) return 1;
+    return 0;
+}
+
+static void print_key(unsigned int key) {
+    if (key < 256) {
+        printf("%s", opcode_name((uint8_t)key));
+        return;
+    }
+
+    unsigned int pair = key - NGRAM_PAIR_BASE;
+    uint8_t first = (uint8_t)(pair >> 8);
+    uint8_t second = (uint8_t)pair;
+    printf("%s -> %s", opcode_name(first), opcode_name(second));
+}
+
+static void count_and_print(const bytefile *bf, const uint8_t *starts, uint8_t *labels) {
+    NgramFreq *freqs = (NgramFreq *)checked_calloc(NGRAM_KEY_COUNT, sizeof(NgramFreq));
+
+    int previous_valid = 0;
+    uint8_t previous_key = 0;
+    int previous_next_ip = -1;
+
+    // Идём по адресам, но учитываем только достижимые инструкции
+    for (int ip = 0; ip < bf->code_size; ++ip) {
+        if (!starts[ip]) continue;
+
+        DecodedInsn ins = decode_instruction(bf, ip);
+
+        if (ins.key == OP_LINE) {
+            if (labels[ip] && ins.next_ip < bf->code_size) {
+                labels[ins.next_ip] = 1;
+            }
+            if (previous_valid && previous_next_ip == ip) {
+                previous_next_ip = ins.next_ip;
+            }
+            continue;
+        }
+
+
+        add_frequency(freqs, ins.key);
+
+        // Метка разрывает последовательность перед инструкцией
+        if (labels[ip]) previous_valid = 0;
+
+        if (previous_valid && previous_next_ip == ip) {
+            add_frequency(freqs, make_pair_key(previous_key, ins.key));
+        }
+
+        previous_key = ins.key;
+        previous_next_ip = ins.next_ip;
+        previous_valid = !ins.is_terminal && !ins.is_branch;
+    }
+
+    size_t unique = 0;
+    for (unsigned int key = 0; key < NGRAM_KEY_COUNT; ++key) {
+        if (freqs[key].used) unique++;
+    }
+
+    SortedFreq *sorted = (SortedFreq *)checked_malloc(unique * sizeof(SortedFreq));
+    size_t at = 0;
+    for (unsigned int key = 0; key < NGRAM_KEY_COUNT; ++key) {
+        if (freqs[key].used) {
+            sorted[at].key = key;
+            sorted[at].count = freqs[key].count;
+            at++;
+        }
+    }
+
+    qsort(sorted, unique, sizeof(SortedFreq), compare_freq);
+
+    for (size_t i = 0; i < unique; ++i) {
+        printf("%8llu  ", (unsigned long long)sorted[i].count);
+        print_key(sorted[i].key);
+        putchar('\n');
+    }
+
+    free(sorted);
     free(freqs);
 }
 
 static void analyze_bytecode(const bytefile *bf) {
-    Instruction *insns = calloc(bf->code_size, sizeof(Instruction));
-    uint8_t *is_label_map = calloc(bf->code_size, 1);
-    if (!insns || !is_label_map) vm_error("Out of memory in analyzer");
+    uint8_t *labels = (uint8_t *)checked_calloc((size_t)bf->code_size, 1);
 
-    int insn_count = 0;
-    
-    // Все экспортируемые функции - безусловные точки входа
-    for (int i = 0; i < bf->public_symbols_number; ++i) {
-        int offset = get_public_offset(bf, i);
-        if (offset >= 0 && offset < bf->code_size) {
-            is_label_map[offset] = 1;
-        }
-    }
+    uint8_t *starts = find_reachable_code(bf, labels);
+    count_and_print(bf, starts, labels);
 
-    int ip = 0;
-    
-    // Парсим инструкции и собираем адреса переходов
-    while (ip < bf->code_size) {
-        int start_ip = ip;
-        unsigned char op = read_byte(bf, &ip);
-        unsigned char h  = (op & 0xF0) >> 4;
-        unsigned char l  = op & 0x0F;
-
-        Instruction *ins = &insns[insn_count++];
-        ins->ip = start_ip;
-
-        if (h == H_BINOP) {
-            static const char* binops[] = {"+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=", "&&", "||"};
-            snprintf(ins->str, sizeof(ins->str), "BINOP %s", binops[l-1]);
-        } 
-        else if (h == H_LD || h == H_LDA || h == H_ST) {
-            int idx = read_int32(bf, &ip);
-            const char* op_name = (h == H_LD) ? "LD" : (h == H_LDA) ? "LDA" : "ST";
-            const char* loc_name = (l == VAR_GLOBAL) ? "G" : (l == VAR_LOCAL) ? "L" : (l == VAR_ARG) ? "A" : "C";
-            snprintf(ins->str, sizeof(ins->str), "%s %s[%d]", op_name, loc_name, idx);
-        }
-        else if (h == H_PATT) {
-            snprintf(ins->str, sizeof(ins->str), "PATT %d", l);
-        } 
-        else {
-            switch (op) {
-                case OP_CONST: snprintf(ins->str, sizeof(ins->str), "CONST %d", read_int32(bf, &ip)); break;
-                case OP_STRING: {
-                    int offset = read_int32(bf, &ip);
-                    const char *s = get_string(bf, offset, start_ip);
-                    
-                    // Экранируем \n, \t, \r
-                    char esc[64];
-                    int epos = 0;
-                    for (int si = 0; s[si] != '\0' && epos < 30; ++si) {
-                        if (s[si] == '\n')      { esc[epos++] = '\\'; if (epos < 30) esc[epos++] = 'n'; }
-                        else if (s[si] == '\t') { esc[epos++] = '\\'; if (epos < 30) esc[epos++] = 't'; }
-                        else if (s[si] == '\r') { esc[epos++] = '\\'; if (epos < 30) esc[epos++] = 'r'; }
-                        else esc[epos++] = s[si];
-                    }
-                    esc[epos] = '\0';
-                    snprintf(ins->str, sizeof(ins->str), "STRING '%s%s'", esc, strlen(s) > 30 ? "..." : "");
-                    break;
-                }
-                case OP_SEXP: {
-                    int tag_offset = read_int32(bf, &ip);
-                    int n = read_int32(bf, &ip);
-                    const char *tag = get_string(bf, tag_offset, start_ip);
-                    snprintf(ins->str, sizeof(ins->str), "SEXP '%s' %d", tag, n);
-                    break;
-                }
-                case OP_STI: snprintf(ins->str, sizeof(ins->str), "STI"); break;
-                case OP_STA: snprintf(ins->str, sizeof(ins->str), "STA"); break;
-                case OP_JMP: {
-                    int target = read_int32(bf, &ip);
-                    if (target >= 0 && target < bf->code_size) is_label_map[target] = 1;
-                    ins->is_terminator = 1;
-                    snprintf(ins->str, sizeof(ins->str), "JMP"); // target опускаем, чтобы одинаковые прыжки схлопывались
-                    break;
-                }
-                case OP_END: ins->is_terminator = 1; snprintf(ins->str, sizeof(ins->str), "END"); break;
-                case OP_RET: ins->is_terminator = 1; snprintf(ins->str, sizeof(ins->str), "RET"); break;
-                case OP_DROP: snprintf(ins->str, sizeof(ins->str), "DROP"); break;
-                case OP_DUP:  snprintf(ins->str, sizeof(ins->str), "DUP"); break;
-                case OP_SWAP: snprintf(ins->str, sizeof(ins->str), "SWAP"); break;
-                case OP_ELEM: snprintf(ins->str, sizeof(ins->str), "ELEM"); break;
-                case OP_CJMPZ: 
-                case OP_CJMPNZ: {
-                    int target = read_int32(bf, &ip);
-                    if (target >= 0 && target < bf->code_size) is_label_map[target] = 1;
-                    ins->is_terminator = 1;
-                    snprintf(ins->str, sizeof(ins->str), "CJMP%s", op == OP_CJMPZ ? "Z" : "NZ");
-                    break;
-                }
-                case OP_BEGIN:
-                case OP_CBEGIN: {
-                    int nargs = read_int32(bf, &ip);
-                    int nlocals = read_int32(bf, &ip);
-                    snprintf(ins->str, sizeof(ins->str), "%s %d %d", op == OP_BEGIN ? "BEGIN" : "CBEGIN", nargs, nlocals);
-                    break;
-                }
-                case OP_CLOSURE: {
-                    int target = read_int32(bf, &ip);
-                    int n = read_int32(bf, &ip);
-                    if (target >= 0 && target < bf->code_size) is_label_map[target] = 1;
-                    int len = snprintf(ins->str, sizeof(ins->str), "CLOSURE (arity: %d)", n);
-                    for (int i = 0; i < n; ++i) {
-                        unsigned char dtype = read_byte(bf, &ip);
-                        int idx = read_int32(bf, &ip);
-                        if (len < (int)sizeof(ins->str)) {
-                            len += snprintf(ins->str + len, sizeof(ins->str) - len, " %d:%d", dtype, idx);
-                        }
-                    }
-                    break;
-                }
-                case OP_CALLC: snprintf(ins->str, sizeof(ins->str), "CALLC %d", read_int32(bf, &ip)); break;
-                case OP_CALL: {
-                    int target = read_int32(bf, &ip);
-                    int argc = read_int32(bf, &ip);
-                    if (target >= 0 && target < bf->code_size) is_label_map[target] = 1;
-                    snprintf(ins->str, sizeof(ins->str), "CALL (argc: %d)", argc);
-                    break;
-                }
-                case OP_TAG: {
-                    int tag_offset = read_int32(bf, &ip);
-                    int n = read_int32(bf, &ip);
-                    const char *tag = get_string(bf, tag_offset, start_ip);
-                    snprintf(ins->str, sizeof(ins->str), "TAG '%s' %d", tag, n);
-                    break;
-                }
-                case OP_ARRAY: snprintf(ins->str, sizeof(ins->str), "ARRAY %d", read_int32(bf, &ip)); break;
-                case OP_FAIL: {
-                    int line = read_int32(bf, &ip);
-                    int col = read_int32(bf, &ip);
-                    ins->is_terminator = 1;
-                    snprintf(ins->str, sizeof(ins->str), "FAIL %d:%d", line, col);
-                    break;
-                }
-                case OP_LINE: {
-                    read_int32(bf, &ip);
-                    snprintf(ins->str, sizeof(ins->str), "LINE");
-                    ins->is_ignored = 1; // Пропускаем чтобы не рвать реальные идиомы
-                    break;
-                }
-                case OP_CALL_READ:   snprintf(ins->str, sizeof(ins->str), "CALL_READ"); break;
-                case OP_CALL_WRITE:  snprintf(ins->str, sizeof(ins->str), "CALL_WRITE"); break;
-                case OP_CALL_LENGTH: snprintf(ins->str, sizeof(ins->str), "CALL_LENGTH"); break;
-                case OP_CALL_STRING: snprintf(ins->str, sizeof(ins->str), "CALL_STRING"); break;
-                case OP_CALL_ARRAY:  snprintf(ins->str, sizeof(ins->str), "CALL_ARRAY %d", read_int32(bf, &ip)); break;
-                case OP_STOP: ins->is_terminator = 1; snprintf(ins->str, sizeof(ins->str), "STOP"); break;
-                default: snprintf(ins->str, sizeof(ins->str), "UNKNOWN_0x%02x", op); break;
-            }
-        }
-    }
-
-    // Сбор n-грамм
-    char **ngrams1 = malloc(insn_count * sizeof(char*));
-    char **ngrams2 = malloc(insn_count * sizeof(char*));
-    if (!ngrams1 || !ngrams2) vm_error("Out of memory for N-grams");
-    
-    int n1_count = 0, n2_count = 0;
-    int last_valid_idx = -1;
-    int propagate_label = 0;
-
-    for (int i = 0; i < insn_count; ++i) {
-        if (is_label_map[insns[i].ip]) propagate_label = 1;
-
-        if (insns[i].is_ignored) continue;
-
-        if (propagate_label) {
-            insns[i].is_label = 1;
-            propagate_label = 0;
-        }
-
-        ngrams1[n1_count++] = insns[i].str;
-
-        if (last_valid_idx != -1) {
-            if (!insns[last_valid_idx].is_terminator && !insns[i].is_label) {
-                size_t len = strlen(insns[last_valid_idx].str) + strlen(insns[i].str) + 5;
-                char *buf = malloc(len);
-                if (buf) {
-                    snprintf(buf, len, "%s -> %s", insns[last_valid_idx].str, insns[i].str);
-                    ngrams2[n2_count++] = buf;
-                }
-            }
-        }
-        last_valid_idx = i;
-    }
-
-    count_and_print(ngrams1, n1_count, "Top 1-grams");
-    count_and_print(ngrams2, n2_count, "Top 2-grams");
-
-    for (int i = 0; i < n2_count; ++i) free(ngrams2[i]);
-    free(ngrams1);
-    free(ngrams2);
-    free(insns);
-    free(is_label_map);
+    free(starts);
+    free(labels);
 }
 
 int main(int argc, char *argv[]) {

@@ -66,7 +66,7 @@ bad_cases = [
     ("Tables size exceeds file size", struct.pack("<iii", 1000, 0, 10)),
     ("Non-null-terminated string table", struct.pack("<iii", 3, 0, 0) + b"abc\xff"),
     ("Truncated instruction (CONST)", struct.pack("<iii", 5, 0, 1) + struct.pack("<iiB", 0, 0, 0) + b"main\x00\x10\x01"),
-    ("String offset out of bounds", struct.pack("<iii", 5, 0, 1) + struct.pack("<iiB", 0, 0, 0) + b"main\x00\x11" + struct.pack("<i", 9999)),
+    ("Jump target out of bounds", struct.pack("<iii", 5, 0, 1) + struct.pack("<iiB", 0, 0, 0) + b"main\x00\x15" + struct.pack("<i", 9999)),
 ]
 
 for desc, payload in bad_cases:
